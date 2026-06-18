@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hey-agent"
+version = "0.1.0"
+description = "A simple systemwide terminal AI agent."
+readme = "hey-agent-ideas.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+hey = "hey.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

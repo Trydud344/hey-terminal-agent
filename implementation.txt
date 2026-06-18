@@ -1,0 +1,254 @@
+hey implementation plan
+=======================
+
+Goal
+----
+
+hey should stay a small, systemwide terminal assistant. It should be quick to
+use, easy to understand, and useful outside a single project folder.
+
+The project should avoid becoming a large coding-agent framework. The first
+agentic version should have one clear loop, one shell tool, simple safety
+rules, and plain terminal output.
+
+
+Core shape
+----------
+
+Keep the current CLI as the entry point, then add a small orchestration layer.
+
+Suggested files:
+
+  src/hey/cli.py
+    Parse arguments, load config, load the system prompt, and call the agent.
+
+  src/hey/config.py
+    Read and write the API URL, API key, and model config.
+
+  src/hey/prompt.py
+    Create and load the editable system prompt file.
+
+  src/hey/llm.py
+    Send OpenAI-compatible chat requests and stream responses.
+
+  src/hey/agent.py
+    Run the assistant loop.
+    Decide whether the model is asking for a shell command.
+    Send command results back to the model.
+    Stop when the model gives a final answer.
+
+  src/hey/shell.py
+    Run shell commands.
+    Capture stdout, stderr, exit code, and duration.
+    Apply timeouts and output truncation.
+    Decide whether a command should ask for confirmation.
+
+Only split out more files when the existing files become genuinely hard to
+read. Avoid plugin systems, registries, daemons, background services, and
+session databases for now.
+
+
+Agent loop
+----------
+
+The first agentic version should work like this:
+
+  1. The user asks something:
+
+       hey why is my laptop overheating
+
+  2. The model asks to run a command:
+
+       reason: inspect CPU-heavy processes
+       command: ps aux | sort -nrk 3 | head
+
+  3. hey prints the command trace to stderr:
+
+       $ ps aux | sort -nrk 3 | head
+       reason: inspect CPU-heavy processes
+
+  4. hey runs the command.
+
+  5. hey sends the command result back to the model.
+
+  6. The model either asks for another command or gives a final answer.
+
+Hard limits for the first version:
+
+  max command steps: 5
+  command timeout: 30 seconds
+  max command output sent back to model: 20 KB
+
+These limits should be plain constants at first. They can become config values
+later if needed.
+
+
+Command protocol
+----------------
+
+Start with a simple text protocol instead of full OpenAI tool calling.
+
+Example model output:
+
+  <command>
+  reason: Check disk usage
+  run: df -h
+  </command>
+
+This is easier to debug, easier for a beginner to understand, and works with
+more OpenAI-compatible providers. Real tool calling can be added later after
+the basic loop feels solid.
+
+The parser should stay strict and small:
+
+  - accept one command block at a time
+  - require both "reason:" and "run:"
+  - ignore malformed command blocks and ask the model for a normal answer
+
+
+Shell result format
+-------------------
+
+Send command results back to the model in a boring, structured format:
+
+  Command: df -h
+  Exit code: 0
+  Duration: 0.04s
+
+  STDOUT:
+  ...
+
+  STDERR:
+  ...
+
+If output is too long, truncate it and include a clear marker:
+
+  [output truncated after 20000 characters]
+
+Never send unlimited command output back into the model.
+
+
+Safety
+------
+
+The assistant is systemwide, so shell commands can affect personal files,
+credentials, apps, packages, services, and operating system settings.
+
+Start with simple command categories.
+
+Auto-run read-only inspection commands:
+
+  pwd
+  whoami
+  uname
+  sw_vers
+  df
+  du
+  ps
+  uptime
+  ls
+  cat
+  head
+  tail
+  grep
+  rg
+  find
+
+Ask for confirmation before commands that probably change the system:
+
+  rm
+  mv
+  cp
+  chmod
+  chown
+  kill
+  pkill
+  brew install
+  brew uninstall
+  apt install
+  apt remove
+  apt upgrade
+  systemctl
+  launchctl
+  defaults write
+
+Require confirmation for obviously dangerous commands:
+
+  rm -rf /
+  disk formatting
+  deleting home directories
+  disabling security settings
+  printing credential files
+
+The first safety check can be simple string matching. It does not need to be
+perfect. The important thing is that risky-looking commands pause before they
+run.
+
+Confirmation can stay simple:
+
+  $ brew update
+  reason: Refresh Homebrew package metadata
+
+  Run this command? [y/N]
+
+
+Pipeable output
+---------------
+
+Keep stdout clean.
+
+stdout:
+
+  final assistant answer
+
+stderr:
+
+  command traces
+  command reasons
+  confirmations
+  debug messages
+  errors
+
+This keeps commands like these useful:
+
+  hey "summarize disk usage" > answer.txt
+  hey "what is using cpu" | pbcopy
+  hey "what is using cpu" 2> trace.log
+
+
+Suggested implementation order
+------------------------------
+
+1. Add shell.py with a tiny command runner.
+
+2. Add an agent.py loop that can handle one command request.
+
+3. Feed command results back into the model.
+
+4. Add max steps, timeout, and truncation.
+
+5. Add confirmation for risky commands.
+
+6. Keep stdout and stderr separated so pipes and redirects stay clean.
+
+7. Add focused tests for the agent loop using fake model responses and fake
+   command runners.
+
+8. Add real shell execution tests only for harmless commands.
+
+9. Later, consider --yes, --dry-run, command history, and real OpenAI tool
+   calling.
+
+
+Design rule
+-----------
+
+hey should feel like a sharp little terminal helper:
+
+  one prompt
+  one loop
+  one shell tool
+  clear command traces
+  concise final answers
+
+If a feature makes the code harder for a newcomer to understand, it should wait.
