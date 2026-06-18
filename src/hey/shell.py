@@ -181,6 +181,14 @@ def run_shell_command(
     if sudo_auth_result is not None:
         return sudo_auth_result
 
+    if _stdio_can_run_interactive_command():
+        return _run_shell_command_interactively(
+            command,
+            started=started,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        )
+
     try:
         completed = subprocess.run(
             command,
@@ -232,27 +240,30 @@ def _run_shell_command_interactively(
     timeout_seconds: float,
     max_output_chars: int,
 ) -> ShellResult:
-    pid, master_fd = pty.fork()
-    if pid == 0:
-        os.execl("/bin/sh", "sh", "-c", command)
-
+    master_fd, slave_fd = pty.openpty()
     old_stdin_attrs = termios.tcgetattr(sys.stdin.fileno())
     output = bytearray()
     timed_out = False
-    status: int | None = None
+    process: subprocess.Popen[bytes] | None = None
 
     try:
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+            start_new_session=True,
+        )
+        os.close(slave_fd)
+        slave_fd = -1
         tty.setcbreak(sys.stdin.fileno())
 
-        while status is None:
-            waited_pid, wait_status = os.waitpid(pid, os.WNOHANG)
-            if waited_pid == pid:
-                status = wait_status
-                break
-
+        while process.poll() is None:
             if time.monotonic() - started > timeout_seconds:
                 timed_out = True
-                _terminate_child(pid)
+                _terminate_process_group(process)
                 break
 
             readable, _, _ = select.select([master_fd, sys.stdin.fileno()], [], [], 0.1)
@@ -267,11 +278,18 @@ def _run_shell_command_interactively(
                     os.write(master_fd, data)
 
         _drain_pty(master_fd, output)
+        exit_code = 124 if timed_out else process.wait()
         if timed_out:
-            status = _wait_for_child_after_timeout(pid)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+                process.wait()
 
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_stdin_attrs)
+        if slave_fd >= 0:
+            os.close(slave_fd)
         os.close(master_fd)
 
     duration = time.monotonic() - started
@@ -280,7 +298,7 @@ def _run_shell_command_interactively(
     stdout, stderr, truncated = _truncate_streams(stdout, stderr, max_output_chars)
     return ShellResult(
         command=command,
-        exit_code=124 if timed_out else _exit_code_from_wait_status(status),
+        exit_code=exit_code,
         duration_seconds=duration,
         stdout=stdout,
         stderr=stderr,
@@ -289,39 +307,18 @@ def _run_shell_command_interactively(
     )
 
 
-def _terminate_child(pid: int) -> None:
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
 
 
-def _kill_child(pid: int) -> None:
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
-
-
-def _wait_for_child_after_timeout(pid: int) -> int:
-    deadline = time.monotonic() + 1
-    while time.monotonic() < deadline:
-        waited_pid, status = os.waitpid(pid, os.WNOHANG)
-        if waited_pid == pid:
-            return status
-        time.sleep(0.05)
-    _kill_child(pid)
-    return os.waitpid(pid, 0)[1]
-
-
-def _exit_code_from_wait_status(status: int | None) -> int:
-    if status is None:
-        return 1
-    if os.WIFEXITED(status):
-        return os.WEXITSTATUS(status)
-    if os.WIFSIGNALED(status):
-        return 128 + os.WTERMSIG(status)
-    return 1
 
 
 def _read_pty(master_fd: int) -> bytes:
