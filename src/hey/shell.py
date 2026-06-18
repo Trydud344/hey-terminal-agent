@@ -168,6 +168,15 @@ def run_shell_command(
     max_output_chars: int,
 ) -> ShellResult:
     started = time.monotonic()
+    can_run_interactively = _stdio_can_run_interactive_command()
+    if can_run_interactively:
+        return _run_shell_command_interactively(
+            command,
+            started=started,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        )
+
     sudo_auth_result = _authenticate_sudo_if_needed(command, timeout_seconds=timeout_seconds)
     if sudo_auth_result is not None:
         return sudo_auth_result
