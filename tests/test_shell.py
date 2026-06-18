@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from hey.shell import command_uses_sudo, run_shell_command, safety_for_command
+from hey.shell import ShellResult, command_uses_sudo, run_shell_command, safety_for_command
 
 
 class ShellTests(unittest.TestCase):
@@ -77,6 +77,7 @@ class ShellTests(unittest.TestCase):
         with (
             mock.patch("hey.shell._running_as_root", return_value=False),
             mock.patch("hey.shell._stdio_can_prompt_for_sudo", return_value=True),
+            mock.patch("hey.shell._stdio_can_run_interactive_command", return_value=False),
             mock.patch("hey.shell.subprocess.run", side_effect=fake_run),
         ):
             result = run_shell_command(
@@ -91,6 +92,44 @@ class ShellTests(unittest.TestCase):
         self.assertNotIn("capture_output", calls[0][1])
         self.assertEqual(calls[1][0][0], "sudo whoami")
         self.assertTrue(calls[1][1]["capture_output"])
+
+    def test_interactive_terminal_uses_pty_runner(self) -> None:
+        with (
+            mock.patch("hey.shell._stdio_can_run_interactive_command", return_value=True),
+            mock.patch("hey.shell._run_shell_command_interactively") as interactive_run,
+            mock.patch("hey.shell.subprocess.run") as normal_run,
+        ):
+            interactive_run.return_value = ShellResult("printf hello", 0, 0.1, stdout="hello")
+
+            result = run_shell_command(
+                "printf hello",
+                timeout_seconds=5,
+                max_output_chars=100,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout, "hello")
+        interactive_run.assert_called_once()
+        normal_run.assert_not_called()
+
+    def test_interactive_sudo_runs_in_pty_without_preauthentication(self) -> None:
+        with (
+            mock.patch("hey.shell._stdio_can_run_interactive_command", return_value=True),
+            mock.patch("hey.shell._run_shell_command_interactively") as interactive_run,
+            mock.patch("hey.shell.subprocess.run") as normal_run,
+        ):
+            interactive_run.return_value = ShellResult("sudo whoami", 0, 0.1, stdout="root")
+
+            result = run_shell_command(
+                "sudo whoami",
+                timeout_seconds=5,
+                max_output_chars=100,
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.stdout, "root")
+        interactive_run.assert_called_once()
+        normal_run.assert_not_called()
 
     def test_sudo_without_terminal_does_not_run_command(self) -> None:
         with (
