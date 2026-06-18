@@ -165,7 +165,7 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(answer, "Disk usage looks fine.")
         self.assertEqual(runner.commands, ["df -h"])
-        self.assertEqual(runner.kwargs[0]["timeout_seconds"], 30.0)
+        self.assertEqual(runner.kwargs[0]["timeout_seconds"], 300.0)
         self.assertEqual(runner.kwargs[0]["max_output_chars"], 20_000)
         self.assertIn("$ df -h", stderr.getvalue())
         self.assertIn("reason: Check disk usage", stderr.getvalue())

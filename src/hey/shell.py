@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import os
+import pty
 import re
+import select
 import shlex
+import signal
 import subprocess
 import sys
+import termios
 import time
+import tty
 from dataclasses import dataclass
 from typing import TextIO
 
@@ -167,6 +172,14 @@ def run_shell_command(
     if sudo_auth_result is not None:
         return sudo_auth_result
 
+    if _stdio_can_run_interactive_command():
+        return _run_shell_command_interactively(
+            command,
+            started=started,
+            timeout_seconds=timeout_seconds,
+            max_output_chars=max_output_chars,
+        )
+
     try:
         completed = subprocess.run(
             command,
@@ -205,6 +218,122 @@ def run_shell_command(
             timed_out=True,
             truncated=truncated,
         )
+
+
+def _stdio_can_run_interactive_command() -> bool:
+    return _stream_is_tty(sys.stdin) and _stream_is_tty(sys.stderr) and os.name == "posix"
+
+
+def _run_shell_command_interactively(
+    command: str,
+    *,
+    started: float,
+    timeout_seconds: float,
+    max_output_chars: int,
+) -> ShellResult:
+    master_fd, slave_fd = pty.openpty()
+    old_stdin_attrs = termios.tcgetattr(sys.stdin.fileno())
+    output = bytearray()
+    timed_out = False
+    process: subprocess.Popen[bytes] | None = None
+
+    try:
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+            start_new_session=True,
+        )
+        os.close(slave_fd)
+        slave_fd = -1
+        tty.setcbreak(sys.stdin.fileno())
+
+        while process.poll() is None:
+            if time.monotonic() - started > timeout_seconds:
+                timed_out = True
+                _terminate_process_group(process)
+                break
+
+            readable, _, _ = select.select([master_fd, sys.stdin.fileno()], [], [], 0.1)
+            if master_fd in readable:
+                chunk = _read_pty(master_fd)
+                if chunk:
+                    output.extend(chunk)
+                    _write_terminal(chunk)
+            if sys.stdin.fileno() in readable:
+                data = os.read(sys.stdin.fileno(), 1024)
+                if data:
+                    os.write(master_fd, data)
+
+        _drain_pty(master_fd, output)
+        exit_code = 124 if timed_out else process.wait()
+        if timed_out:
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+                process.wait()
+
+    finally:
+        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_stdin_attrs)
+        if slave_fd >= 0:
+            os.close(slave_fd)
+        os.close(master_fd)
+
+    duration = time.monotonic() - started
+    stdout = output.decode("utf-8", errors="replace")
+    stderr = f"Command timed out after {timeout_seconds:g} seconds." if timed_out else ""
+    stdout, stderr, truncated = _truncate_streams(stdout, stderr, max_output_chars)
+    return ShellResult(
+        command=command,
+        exit_code=exit_code,
+        duration_seconds=duration,
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        truncated=truncated,
+    )
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
+def _read_pty(master_fd: int) -> bytes:
+    try:
+        return os.read(master_fd, 4096)
+    except OSError:
+        return b""
+
+
+def _drain_pty(master_fd: int, output: bytearray) -> None:
+    while True:
+        readable, _, _ = select.select([master_fd], [], [], 0)
+        if master_fd not in readable:
+            return
+        chunk = _read_pty(master_fd)
+        if not chunk:
+            return
+        output.extend(chunk)
+        _write_terminal(chunk)
+
+
+def _write_terminal(chunk: bytes) -> None:
+    sys.stderr.buffer.write(chunk)
+    sys.stderr.buffer.flush()
 
 
 def command_uses_sudo(command: str) -> bool:
