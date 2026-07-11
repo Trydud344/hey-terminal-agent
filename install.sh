@@ -398,7 +398,7 @@ if [[ ! -f pyproject.toml ]]; then
 fi
 
 # Extract package name cleanly
-PKG_NAME="$(grep -E '^name\s*=' pyproject.toml | head -1 | sed 's/.*=\s*"\(.*\)".*/\1/' 2>/dev/null || echo "hey-agent")"
+PKG_NAME="$(grep -E '^name\s*=' pyproject.toml | head -1 | sed 's/^name\s*=\s*"\(.*\)".*/\1/' 2>/dev/null || echo "hey-agent")"
 echo "  Package: $PKG_NAME"
 
 # ────────────────────────────────────────────────────────────
@@ -441,7 +441,19 @@ elif [[ "$INSTALL_DIR" == "$HOME/.local" ]]; then
             --no-build-isolation \
             --quiet $PEP668_BREAK
     }
-    TARGET_BIN_DIR="$HOME/.local/bin"
+    # --user install puts scripts in USER_BASE/bin — macOS uses ~/Library/Python/X.Y/bin, Linux uses ~/.local/bin
+    USER_BASE="$("$PYTHON" -c 'import site; print(site.USER_BASE)' 2>/dev/null)"
+    TARGET_BIN_DIR="${USER_BASE}/bin"
+    # Verify the binary actually landed there
+    if [[ ! -x "$TARGET_BIN_DIR/hey" ]]; then
+        # Try common macOS paths
+        for mac_path in "$HOME/Library/Python/3."*/bin/hey; do
+            if [[ -x "$mac_path" ]]; then
+                TARGET_BIN_DIR="$(dirname "$mac_path")"
+                break
+            fi
+        done
+    fi
 else
     info "Installing to $INSTALL_DIR with --prefix ..."
     mkdir -p "$INSTALL_DIR/lib"
