@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
+# Handle unbound BASH_SOURCE when piping via curl | bash
+if [[ -z "${BASH_SOURCE:-}" || "${#BASH_SOURCE[@]}" -eq 0 ]]; then
+    BASH_SOURCE=("$0")
+fi
+shopt -s expand_aliases 2>/dev/null || true
+# Re-enable -u after BASH_SOURCE guard
+set -u
 
 # ────────────────────────────────────────────────────────────
 #  hey-agent install script
@@ -20,8 +27,15 @@ warn()  { printf "${YELLOW}==>${RESET}${BOLD} %s${RESET}\n" "$*"; }
 err()   { printf "${RED}==>${RESET}${BOLD} %s${RESET}\n" "$*" >&2; }
 header(){ printf "\n${CYAN}━━━ %s ━━━${RESET}\n" "$*"; }
 
-# ---- Paths ----
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ---- Detect if running from a local file or piped via curl ----
+# When piped via curl | bash, SCRIPT_DIR will not point to the repo.
+SCRIPT_SOURCE="$0"
+if [[ "$SCRIPT_SOURCE" == "bash" || "$SCRIPT_SOURCE" == "/dev/stdin" || "$SCRIPT_SOURCE" == "sh" || "$SCRIPT_SOURCE" == "zsh" || ! -f "$SCRIPT_SOURCE" ]]; then
+    PIPED_INSTALL=true
+else
+    PIPED_INSTALL=false
+fi
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE" 2>/dev/null || echo ".")" 2>/dev/null && pwd 2>/dev/null || echo "")"
 REPO_DIR="$SCRIPT_DIR"
 
 # ---- Parse flags ----
@@ -64,7 +78,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Normalise install dir
-INSTALL_DIR="$(realpath -m "$INSTALL_DIR" 2>/dev/null || readlink -f "$INSTALL_DIR" 2>/dev/null || echo "$INSTALL_DIR")"
+# Portable realpath: resolve ~ and make absolute without requiring GNU realpath
+case "$INSTALL_DIR" in
+    "~"/*|"~")
+        INSTALL_DIR="$HOME/${INSTALL_DIR#"/"~}" ;;
+esac
+INSTALL_DIR="$(cd -- "$INSTALL_DIR" 2>/dev/null && pwd -P 2>/dev/null || echo "$INSTALL_DIR")"
 BIN_DIR="$INSTALL_DIR/bin"
 TARGET_BIN_DIR="$BIN_DIR"
 
@@ -340,6 +359,19 @@ if [[ -n "$CLONE_REPO" ]]; then
     git clone --depth=1 "$CLONE_REPO" "$CLONE_DEST"
     cd "$CLONE_DEST"
     echo "  Source: $CLONE_DEST"
+elif $PIPED_INSTALL; then
+    err "This script was piped via curl | bash and no local repo was found."
+    err "When piping the installer, you must provide --clone:"
+    err ""
+    err "    curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash -s -- --clone https://github.com/youruser/hey-agent.git"
+    err ""
+    err "Alternatively, clone the repo manually first then run install.sh from it:"
+    err ""
+    err "    git clone https://github.com/youruser/hey-agent.git"
+    err "    cd hey-agent"
+    err "    ./install.sh"
+    err ""
+    exit 1
 else
     cd "$REPO_DIR"
     echo "  Source: $REPO_DIR (local)"
