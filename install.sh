@@ -203,11 +203,21 @@ if [[ -n "$PYTHON" ]] && ! py_has_pip "$PYTHON"; then
     } || {
         warn "ensurepip failed. Trying get-pip.py..."
         if command -v curl >/dev/null 2>&1; then
-            curl -sS https://bootstrap.pypa.io/get-pip.py | "$PYTHON" 2>/dev/null || true
+            curl -sS https://bootstrap.pypa.io/get-pip.py | "$PYTHON" 2>&1 || true
         elif command -v wget >/dev/null 2>&1; then
-            wget -qO- https://bootstrap.pypa.io/get-pip.py | "$PYTHON" 2>/dev/null || true
+            wget -qO- https://bootstrap.pypa.io/get-pip.py | "$PYTHON" 2>&1 || true
         fi
     }
+    if ! py_has_pip "$PYTHON"; then
+        # On Debian/Ubuntu, try installing pip via apt-get directly
+        if [[ "$PKG_MANAGER" == "apt-get" ]] && command -v apt-get >/dev/null 2>&1; then
+            warn "get-pip.py failed. Trying to install python3-pip via apt-get..."
+            sudo apt-get install -y -qq python3-pip python3-venv 2>/dev/null || true
+            if py_has_pip "$PYTHON"; then
+                info "python3-pip installed via apt-get."
+            fi
+        fi
+    fi
     if ! py_has_pip "$PYTHON"; then
         # Fall back to system pip if available
         if command -v pip3 >/dev/null 2>&1; then
@@ -312,6 +322,10 @@ if [[ -n "$CLONE_REPO" ]] && ! command -v git >/dev/null 2>&1; then
     MISSING+=("git")
 fi
 
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    MISSING+=("curl or wget")
+fi
+
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     echo "  Missing: ${MISSING[*]}"
     if [[ $SKIP_PREREQS -eq 1 ]]; then
@@ -394,36 +408,49 @@ header "Build and install"
 
 mkdir -p "$BIN_DIR"
 
-# Upgrade pip/setuptools/wheel in a safe way
-info "Ensuring pip, setuptools, and wheel are up to date..."
-"$PYTHON" -m pip install --upgrade pip setuptools wheel --quiet 2>/dev/null || true
-
-# For the standard ~/.local path, use pip's --user flag which puts
-# scripts in ~/.local/bin automatically. For custom paths, use
-# --prefix to control exactly where things go.
-
-USE_USER_FLAG=false
-if [[ "$INSTALL_DIR" == "$HOME/.local" ]]; then
-    USE_USER_FLAG=true
+# Check if we're inside a virtual environment
+IN_VENV=false
+if [[ -n "${VIRTUAL_ENV:-}" || -n "${PIP_REQUIRE_VIRTUALENV:-}" ]]; then
+    IN_VENV=true
 fi
 
-if $USE_USER_FLAG; then
+# Check if system Python has PEP 668 externally-managed-environment
+PEP668_BREAK=""
+SITE_PACKAGES_HINT="$("$PYTHON" -m pip install --dry-run --user hey 2>&1 || true)"
+if echo "$SITE_PACKAGES_HINT" | grep -qi "externally-managed" 2>/dev/null; then
+    PEP668_BREAK="--break-system-packages"
+fi
+
+# Upgrade pip/setuptools/wheel in a safe way
+info "Ensuring pip, setuptools, and wheel are up to date..."
+"$PYTHON" -m pip install --upgrade pip setuptools wheel --quiet $PEP668_BREAK 2>/dev/null || true
+
+# Decide install method
+if $IN_VENV; then
+    info "Installing inside active virtualenv (${VIRTUAL_ENV:-detected})..."
+    "$PYTHON" -m pip install -e "$(pwd)" --no-build-isolation --quiet
+    TARGET_BIN_DIR="$(dirname "$(command -v "$PYTHON" 2>/dev/null || echo "$HOME/.local/bin")" 2>/dev/null)" 2>/dev/null || TARGET_BIN_DIR="$HOME/.local/bin"
+elif [[ "$INSTALL_DIR" == "$HOME/.local" ]]; then
     info "Installing with pip install --user ..."
-    "$PYTHON" -m pip install --user -e "$(pwd)" --no-build-isolation --quiet
-    echo ""
-    info "Package installed with --user flag."
+    "$PYTHON" -m pip install --user -e "$(pwd)" --no-build-isolation --quiet $PEP668_BREAK || {
+        warn "pip --user failed. Trying --prefix $HOME/.local ..."
+        mkdir -p "$INSTALL_DIR/lib/python$($PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages" 2>/dev/null || true
+        "$PYTHON" -m pip install \
+            --prefix "$INSTALL_DIR" \
+            -e "$(pwd)" \
+            --no-build-isolation \
+            --quiet $PEP668_BREAK
+    }
     TARGET_BIN_DIR="$HOME/.local/bin"
 else
     info "Installing to $INSTALL_DIR with --prefix ..."
-    # Build the wheel first for a cleaner install
-    "$PYTHON" -m pip install build --quiet 2>/dev/null || true
+    mkdir -p "$INSTALL_DIR/lib"
 
-    # Install with --prefix so scripts land in INSTALL_DIR/bin
     "$PYTHON" -m pip install \
         --prefix "$INSTALL_DIR" \
         -e "$(pwd)" \
         --no-build-isolation \
-        --quiet
+        --quiet $PEP668_BREAK
 
     TARGET_BIN_DIR="$INSTALL_DIR/bin"
 
@@ -436,10 +463,10 @@ WRAPPER
         chmod +x "$TARGET_BIN_DIR/hey"
         echo "  Created wrapper script at $TARGET_BIN_DIR/hey"
     fi
-    echo ""
-    info "Package installed."
-    echo "  The 'hey' command should be at: $TARGET_BIN_DIR/hey"
 fi
+
+echo ""
+info "Package installed."
 
 # Verify the binary
 HEY_BIN=""
