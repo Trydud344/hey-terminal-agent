@@ -26,7 +26,7 @@ No project folder anchoring. No complex TUI. Just you, your terminal, and an AI 
 ### One-liner (curl | bash)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Trydud344/hey-terminal-agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Trydud344/hey-terminal-agent/refs/heads/main/install.sh | bash
 ```
 
 This detects your OS, checks for Python ≥ 3.12, installs any missing prerequisites, builds the package, and adds the `hey` command to your PATH.
